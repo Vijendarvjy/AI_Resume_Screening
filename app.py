@@ -14,6 +14,7 @@ from typing import TypedDict, List
 
 # Load environment variables
 load_dotenv()
+GROQ_API_KEY=your_groq_api_key_here
 
 # Initialize LLM
 llm = ChatGroq(
