@@ -4,7 +4,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from langchain_groq import ChatGroq
-from langchain.schema import Document
+from langchain_core.documents import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import Chroma
