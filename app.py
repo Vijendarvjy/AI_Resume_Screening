@@ -14,8 +14,14 @@ from typing import TypedDict, List
 
 # Load environment variables
 load_dotenv()
-GROQ_API_KEY=your_groq_api_key_here
-
+# -------------------------------
+# LOAD API KEY
+# -------------------------------
+try:
+    GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+except KeyError:
+    st.error("❌ GROQ_API_KEY not found in Streamlit secrets.")
+    st.stop()
 # Initialize LLM
 llm = ChatGroq(
     groq_api_key=os.getenv("GROQ_API_KEY"),
