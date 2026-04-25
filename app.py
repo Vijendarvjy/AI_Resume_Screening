@@ -33,7 +33,7 @@ llm = ChatGroq(
 )
 
 # -------------------------------
-# STATE  ← ADD THIS BACK
+# STATE
 # -------------------------------
 class ResumeState(TypedDict):
     resume_text: str
@@ -48,12 +48,20 @@ class ResumeState(TypedDict):
 # HELPERS
 # -------------------------------
 def safe_trim(text: str, limit: int) -> str:
-    ...
+    return str(text)[:limit]
+
+def safe_invoke(prompt: str, fallback: str = "Unavailable") -> str:
+    try:
+        response = llm.invoke(prompt)
+        return response.content
+    except Exception as e:
+        return f"{fallback}: {str(e)}"
+
 # -------------------------------
 # NODE 1: PARSE RESUME
 # -------------------------------
 def parse_resume(state):
-    resume_text = safe_trim(state["resume_text"], 6000)  # reduced
+    resume_text = safe_trim(state["resume_text"], 6000)
 
     prompt = f"""Extract structured JSON from this resume.
 
@@ -77,7 +85,6 @@ Return ONLY the JSON. No explanation. No markdown."""
     try:
         response = llm.invoke(prompt)
         content = response.content.strip()
-        # Strip markdown fences if present
         if "```" in content:
             content = content.split("```")[1]
             if content.startswith("json"):
@@ -95,8 +102,8 @@ Return ONLY the JSON. No explanation. No markdown."""
 # NODE 2: JD ANALYSIS
 # -------------------------------
 def analyze_jd(state):
-    resume = safe_trim(state["resume_text"], 3000)  # reduced
-    jd = safe_trim(state["job_description"], 1500)  # reduced
+    resume = safe_trim(state["resume_text"], 3000)
+    jd = safe_trim(state["job_description"], 1500)
 
     prompt = f"""Compare this resume and job description. Be concise.
 
@@ -189,14 +196,12 @@ graph = workflow.compile()
 # STREAMLIT UI
 # -------------------------------
 st.set_page_config(page_title="AI Resume Screener", layout="wide")
-
 st.title("🤖 AI Resume Screening System")
 
 uploaded_file = st.file_uploader("Upload Resume (PDF)", type=["pdf"])
 job_description = st.text_area("Paste Job Description", height=250)
 
 if st.button("Analyze Resume"):
-
     if uploaded_file and job_description:
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -205,11 +210,9 @@ if st.button("Analyze Resume"):
 
         loader = PyPDFLoader(temp_path)
         pages = loader.load()
-
         resume_text = "\n".join([p.page_content for p in pages])
 
         with st.spinner("Analyzing resume..."):
-
             result = graph.invoke({
                 "resume_text": resume_text,
                 "job_description": job_description
@@ -229,3 +232,5 @@ if st.button("Analyze Resume"):
 
         st.subheader("🎤 Interview Questions")
         st.write(result["interview_questions"])
+    else:
+        st.warning("⚠️ Please upload a resume and enter a job description.")
