@@ -33,18 +33,22 @@ llm = ChatGroq(
 )
 
 # -------------------------------
+# STATE  ← ADD THIS BACK
+# -------------------------------
+class ResumeState(TypedDict):
+    resume_text: str
+    job_description: str
+    parsed_resume: dict
+    jd_analysis: str
+    match_score: str
+    recommendation: str
+    interview_questions: str
+
+# -------------------------------
 # HELPERS
 # -------------------------------
 def safe_trim(text: str, limit: int) -> str:
-    return str(text)[:limit]
-
-def safe_invoke(prompt: str, fallback: str = "Unavailable") -> str:
-    try:
-        response = llm.invoke(prompt)
-        return response.content
-    except Exception as e:
-        return f"{fallback}: {str(e)}"
-
+    ...
 # -------------------------------
 # NODE 1: PARSE RESUME
 # -------------------------------
