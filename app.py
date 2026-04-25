@@ -45,18 +45,55 @@ class ResumeState(TypedDict):
 
 # Resume Parser Node
 def parse_resume(state):
+    """Parse resume using Groq with token-safe prompt."""
+    
+    # Limit resume length to avoid Groq token overflow
+    resume_text = state["resume_text"][:12000]
+
     prompt = f"""
-    Extract the following from the resume:
-    - Skills
-    - Experience
-    - Education
-    - Projects
+    Extract the following information from this resume and return ONLY valid JSON.
+
+    Required Fields:
+    - name
+    - email
+    - phone
+    - skills (list)
+    - experience_years
+    - education
+    - certifications (list)
+    - projects (list)
 
     Resume:
-    {state['resume_text']}
+    {resume_text}
+
+    Return JSON only.
     """
-    response = llm.invoke(prompt)
-    return {"parsed_resume": response.content}
+
+    try:
+        response = llm.invoke(prompt)
+        content = response.content.strip()
+
+        # Remove markdown formatting if present
+        if content.startswith("```json"):
+            content = content.replace("```json", "").replace("```", "").strip()
+
+        parsed_data = json.loads(content)
+        return {"parsed_resume": parsed_data}
+
+    except Exception as e:
+        st.error(f"Resume Parsing Error: {str(e)}")
+        return {
+            "parsed_resume": {
+                "name": "Unknown",
+                "email": "",
+                "phone": "",
+                "skills": [],
+                "experience_years": 0,
+                "education": "",
+                "certifications": [],
+                "projects": []
+            }
+        }
 
 # JD Analyzer Node
 def analyze_jd(state):
