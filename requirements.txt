@@ -3,7 +3,7 @@ streamlit==1.44.1
 langchain==0.3.25
 langchain-core==0.3.59
 langchain-community==0.3.24
-langchain-text-splitters==0.3.8
+langchain-text-splitters
 langchain-huggingface==0.1.2
 langchain-groq==0.3.2
 langgraph==0.4.1
