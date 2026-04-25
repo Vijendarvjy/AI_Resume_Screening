@@ -25,7 +25,7 @@ except KeyError:
 # Initialize LLM
 llm = ChatGroq(
     groq_api_key=os.getenv("GROQ_API_KEY"),
-    model_name="meta-llama/llama-prompt-guard-2-22m"
+    model_name="meta-llama/llama-prompt-guard-2-86m"
 )
 
 # Embedding Model
