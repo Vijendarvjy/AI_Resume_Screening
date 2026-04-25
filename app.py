@@ -96,18 +96,10 @@ def parse_resume(state):
         }
 
 # JD Analyzer Node
-def analyze_jd(state):
-    prompt = f"""
-    Analyze this job description and extract:
-    - Required Skills
-    - Experience
-    - Responsibilities
-
-    Job Description:
-    {state['job_description']}
-    """
+def analyze_jd(prompt):
+    prompt = prompt[:6000]   # quick safety cap
     response = llm.invoke(prompt)
-    return {"jd_analysis": response.content}
+    return response
 
 # Match Score Node
 def calculate_match(state):
