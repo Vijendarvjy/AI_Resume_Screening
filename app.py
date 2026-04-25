@@ -1,87 +1,92 @@
 import os
+import json
 import tempfile
 import streamlit as st
 from dotenv import load_dotenv
 
 from langchain_groq import ChatGroq
-from langchain_core.documents import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.vectorstores import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
 from langgraph.graph import StateGraph, END
 from typing import TypedDict, List
 
-# Load environment variables
+# -------------------------------
+# ENV SETUP
+# -------------------------------
 load_dotenv()
-# -------------------------------
-# LOAD API KEY
-# -------------------------------
+
 try:
     GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-except KeyError:
-    st.error("❌ GROQ_API_KEY not found in Streamlit secrets.")
+except Exception:
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+if not GROQ_API_KEY:
+    st.error("❌ GROQ_API_KEY not found in environment or secrets.")
     st.stop()
-# Initialize LLM
+
+# -------------------------------
+# LLM
+# -------------------------------
 llm = ChatGroq(
-    groq_api_key=os.getenv("GROQ_API_KEY"),
-    model_name="meta-llama/llama-prompt-guard-2-86m"
+    api_key=GROQ_API_KEY,
+    model="llama3-8b-8192",
+    max_tokens=1024
 )
 
-# Embedding Model
-embedding_model = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
-)
-
-# State Schema
+# -------------------------------
+# STATE
+# -------------------------------
 class ResumeState(TypedDict):
     resume_text: str
     job_description: str
-    parsed_resume: str
+    parsed_resume: dict
     jd_analysis: str
     match_score: str
     recommendation: str
     interview_questions: str
 
-# Resume Parser Node
+# -------------------------------
+# HELPERS
+# -------------------------------
+def safe_trim(text: str, limit: int) -> str:
+    return str(text)[:limit]
+
+# -------------------------------
+# NODE 1: PARSE RESUME
+# -------------------------------
 def parse_resume(state):
-    """Parse resume using Groq with token-safe prompt."""
-    
-    # Limit resume length to avoid Groq token overflow
-    resume_text = state["resume_text"][:12000]
+    resume_text = safe_trim(state["resume_text"], 12000)
 
     prompt = f"""
-    Extract the following information from this resume and return ONLY valid JSON.
+Extract structured JSON from resume.
 
-    Required Fields:
-    - name
-    - email
-    - phone
-    - skills (list)
-    - experience_years
-    - education
-    - certifications (list)
-    - projects (list)
+Fields:
+- name
+- email
+- phone
+- skills (list)
+- experience_years
+- education
+- certifications (list)
+- projects (list)
 
-    Resume:
-    {resume_text}
+Resume:
+{resume_text}
 
-    Return JSON only.
-    """
+Return ONLY JSON.
+"""
 
     try:
         response = llm.invoke(prompt)
         content = response.content.strip()
 
-        # Remove markdown formatting if present
-        if content.startswith("```json"):
+        if content.startswith("```"):
             content = content.replace("```json", "").replace("```", "").strip()
 
-        parsed_data = json.loads(content)
-        return {"parsed_resume": parsed_data}
+        parsed = json.loads(content)
+
+        return {"parsed_resume": parsed}
 
     except Exception as e:
-        st.error(f"Resume Parsing Error: {str(e)}")
         return {
             "parsed_resume": {
                 "name": "Unknown",
@@ -95,66 +100,91 @@ def parse_resume(state):
             }
         }
 
+# -------------------------------
+# NODE 2: JD ANALYSIS
+# -------------------------------
 def analyze_jd(state):
-    resume = str(state["resume"])[:4000]
-    jd = str(state["jd"])[:2000]
+    resume = safe_trim(state["resume_text"], 4000)
+    jd = safe_trim(state["job_description"], 2500)
 
     prompt = f"""
-    Match resume to job description.
+Compare Resume and Job Description.
 
-    Resume:
-    {resume}
+Resume:
+{resume}
 
-    Job Description:
-    {jd}
+Job Description:
+{jd}
 
-    Output:
-    - Skills match
-    - Score (0-100)
-    """
+Return:
+- Key Skills Match
+- Missing Skills
+- Score (0-100)
+"""
 
     response = llm.invoke(prompt)
-    return {"result": response}
 
-# Match Score Node
+    return {"jd_analysis": response.content}
+
+# -------------------------------
+# NODE 3: MATCH SCORE
+# -------------------------------
 def calculate_match(state):
     prompt = f"""
-    Compare the resume and job description.
+Evaluate candidate fit.
 
-    Resume Analysis:
-    {state['parsed_resume']}
+Resume:
+{state['parsed_resume']}
 
-    JD Analysis:
-    {state['jd_analysis']}
+JD Analysis:
+{state['jd_analysis']}
 
-    Provide:
-    - Match Percentage
-    - Missing Skills
-    - Strengths
-    """
+Return:
+- Match Percentage
+- Strengths
+- Missing Skills
+"""
+
     response = llm.invoke(prompt)
+
     return {"match_score": response.content}
 
-# Recommendation Node
+# -------------------------------
+# NODE 4: RECOMMENDATION
+# -------------------------------
 def generate_recommendation(state):
     prompt = f"""
-    Based on the candidate evaluation, provide:
-    - Hire / Reject / Consider
-    - Reasoning
-    """
+Based on evaluation:
+
+{state['match_score']}
+
+Decide:
+- Hire / Reject / Consider
+- Reason
+"""
+
     response = llm.invoke(prompt)
+
     return {"recommendation": response.content}
 
-# Interview Questions Node
+# -------------------------------
+# NODE 5: INTERVIEW QUESTIONS
+# -------------------------------
 def generate_questions(state):
     prompt = f"""
-    Generate 10 technical interview questions
-    based on the candidate profile.
-    """
+Generate 10 technical interview questions
+based on:
+
+{state['parsed_resume']}
+"""
+
     response = llm.invoke(prompt)
+
     return {"interview_questions": response.content}
 
-# Build LangGraph
+# -------------------------------
+# LANGGRAPH SETUP
+# -------------------------------
 workflow = StateGraph(ResumeState)
 
 workflow.add_node("parse_resume", parse_resume)
@@ -173,23 +203,20 @@ workflow.add_edge("generate_questions", END)
 
 graph = workflow.compile()
 
-# Streamlit UI
+# -------------------------------
+# STREAMLIT UI
+# -------------------------------
 st.set_page_config(page_title="AI Resume Screener", layout="wide")
 
 st.title("🤖 AI Resume Screening System")
 
-uploaded_file = st.file_uploader(
-    "Upload Resume (PDF)",
-    type=["pdf"]
-)
-
-job_description = st.text_area(
-    "Paste Job Description",
-    height=300
-)
+uploaded_file = st.file_uploader("Upload Resume (PDF)", type=["pdf"])
+job_description = st.text_area("Paste Job Description", height=250)
 
 if st.button("Analyze Resume"):
+
     if uploaded_file and job_description:
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(uploaded_file.read())
             temp_path = tmp.name
@@ -197,17 +224,19 @@ if st.button("Analyze Resume"):
         loader = PyPDFLoader(temp_path)
         pages = loader.load()
 
-        resume_text = "\n".join([page.page_content for page in pages])
+        resume_text = "\n".join([p.page_content for p in pages])
 
-        result = graph.invoke({
-            "resume_text": resume_text,
-            "job_description": job_description
-        })
+        with st.spinner("Analyzing resume..."):
 
-        st.subheader("📄 Resume Analysis")
-        st.write(result["parsed_resume"])
+            result = graph.invoke({
+                "resume_text": resume_text,
+                "job_description": job_description
+            })
 
-        st.subheader("🎯 Job Description Analysis")
+        st.subheader("📄 Parsed Resume")
+        st.json(result["parsed_resume"])
+
+        st.subheader("🎯 JD Analysis")
         st.write(result["jd_analysis"])
 
         st.subheader("📊 Match Score")
