@@ -28,21 +28,9 @@ if not GROQ_API_KEY:
 # -------------------------------
 llm = ChatGroq(
     api_key=GROQ_API_KEY,
-    model="meta-llama/llama-prompt-guard-2-22m",
-    max_tokens=512
+    model="llama-3.3-70b-versatile",
+    max_tokens=1024
 )
-
-# -------------------------------
-# STATE
-# -------------------------------
-class ResumeState(TypedDict):
-    resume_text: str
-    job_description: str
-    parsed_resume: dict
-    jd_analysis: str
-    match_score: str
-    recommendation: str
-    interview_questions: str
 
 # -------------------------------
 # HELPERS
@@ -50,65 +38,63 @@ class ResumeState(TypedDict):
 def safe_trim(text: str, limit: int) -> str:
     return str(text)[:limit]
 
+def safe_invoke(prompt: str, fallback: str = "Unavailable") -> str:
+    try:
+        response = llm.invoke(prompt)
+        return response.content
+    except Exception as e:
+        return f"{fallback}: {str(e)}"
+
 # -------------------------------
 # NODE 1: PARSE RESUME
 # -------------------------------
 def parse_resume(state):
-    resume_text = safe_trim(state["resume_text"], 12000)
+    resume_text = safe_trim(state["resume_text"], 6000)  # reduced
 
-    prompt = f"""
-Extract structured JSON from resume.
+    prompt = f"""Extract structured JSON from this resume.
 
-Fields:
-- name
-- email
-- phone
-- skills (list)
-- experience_years
-- education
-- certifications (list)
-- projects (list)
+Return ONLY a valid JSON object with these exact fields:
+{{
+  "name": "string",
+  "email": "string",
+  "phone": "string",
+  "skills": ["list", "of", "skills"],
+  "experience_years": 0,
+  "education": "string",
+  "certifications": ["list"],
+  "projects": ["list"]
+}}
 
 Resume:
 {resume_text}
 
-Return ONLY JSON.
-"""
+Return ONLY the JSON. No explanation. No markdown."""
 
     try:
         response = llm.invoke(prompt)
         content = response.content.strip()
-
-        if content.startswith("```"):
-            content = content.replace("```json", "").replace("```", "").strip()
-
-        parsed = json.loads(content)
-
-        return {"parsed_resume": parsed}
-
+        # Strip markdown fences if present
+        if "```" in content:
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        return {"parsed_resume": json.loads(content.strip())}
     except Exception as e:
-        return {
-            "parsed_resume": {
-                "name": "Unknown",
-                "email": "",
-                "phone": "",
-                "skills": [],
-                "experience_years": 0,
-                "education": "",
-                "certifications": [],
-                "projects": []
-            }
-        }
+        st.warning(f"Resume parsing failed: {e}")
+        return {"parsed_resume": {
+            "name": "Unknown", "email": "", "phone": "",
+            "skills": [], "experience_years": 0, "education": "",
+            "certifications": [], "projects": []
+        }}
 
 # -------------------------------
 # NODE 2: JD ANALYSIS
 # -------------------------------
 def analyze_jd(state):
-    resume = safe_trim(state["resume_text"], 4000)
-    jd = safe_trim(state["job_description"], 2500)
+    resume = safe_trim(state["resume_text"], 3000)  # reduced
+    jd = safe_trim(state["job_description"], 1500)  # reduced
 
-    prompt = f"""
-Compare Resume and Job Description.
+    prompt = f"""Compare this resume and job description. Be concise.
 
 Resume:
 {resume}
@@ -116,71 +102,63 @@ Resume:
 Job Description:
 {jd}
 
-Return:
-- Key Skills Match
-- Missing Skills
-- Score (0-100)
-"""
-    try:
-        response = llm.invoke(prompt)
-        return {"jd_analysis": response.content}
-    except Exception as e:
-        return {"jd_analysis": f"Analysis failed: {str(e)}"}
+List:
+1. Matching skills
+2. Missing skills
+3. Overall fit score (0-100)"""
+
+    return {"jd_analysis": safe_invoke(prompt, "JD Analysis failed")}
+
 # -------------------------------
 # NODE 3: MATCH SCORE
 # -------------------------------
 def calculate_match(state):
-    prompt = f"""
-Evaluate candidate fit.
+    jd_analysis = safe_trim(str(state["jd_analysis"]), 1500)
+    parsed = safe_trim(str(state["parsed_resume"]), 1000)
 
-Resume:
-{state['parsed_resume']}
+    prompt = f"""Based on this analysis, provide a match report.
+
+Parsed Resume Summary:
+{parsed}
 
 JD Analysis:
-{state['jd_analysis']}
+{jd_analysis}
 
 Return:
-- Match Percentage
-- Strengths
-- Missing Skills
-"""
+- Match Percentage (e.g. 78%)
+- Top 3 Strengths
+- Top 3 Gaps"""
 
-    response = llm.invoke(prompt)
-
-    return {"match_score": response.content}
+    return {"match_score": safe_invoke(prompt, "Match scoring failed")}
 
 # -------------------------------
 # NODE 4: RECOMMENDATION
 # -------------------------------
 def generate_recommendation(state):
-    prompt = f"""
-Based on evaluation:
+    match = safe_trim(str(state["match_score"]), 1000)
 
-{state['match_score']}
+    prompt = f"""Based on this match report, give a hiring recommendation.
 
-Decide:
-- Hire / Reject / Consider
-- Reason
-"""
+{match}
 
-    response = llm.invoke(prompt)
+Output:
+- Decision: Hire / Reject / Consider
+- One paragraph reason"""
 
-    return {"recommendation": response.content}
+    return {"recommendation": safe_invoke(prompt, "Recommendation failed")}
 
 # -------------------------------
 # NODE 5: INTERVIEW QUESTIONS
 # -------------------------------
 def generate_questions(state):
-    prompt = f"""
-Generate 10 technical interview questions
-based on:
+    skills = state["parsed_resume"].get("skills", [])
+    skills_str = ", ".join(skills) if skills else "general software engineering"
 
-{state['parsed_resume']}
-"""
+    prompt = f"""Generate 10 concise technical interview questions for a candidate with these skills: {skills_str}.
 
-    response = llm.invoke(prompt)
+Number each question. Be specific and practical."""
 
-    return {"interview_questions": response.content}
+    return {"interview_questions": safe_invoke(prompt, "Question generation failed")}
 
 # -------------------------------
 # LANGGRAPH SETUP
