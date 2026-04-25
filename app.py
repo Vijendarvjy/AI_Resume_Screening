@@ -121,11 +121,11 @@ Return:
 - Missing Skills
 - Score (0-100)
 """
-
-    response = llm.invoke(prompt)
-
-    return {"jd_analysis": response.content}
-
+    try:
+        response = llm.invoke(prompt)
+        return {"jd_analysis": response.content}
+    except Exception as e:
+        return {"jd_analysis": f"Analysis failed: {str(e)}"}
 # -------------------------------
 # NODE 3: MATCH SCORE
 # -------------------------------
