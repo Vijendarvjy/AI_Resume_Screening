@@ -28,8 +28,8 @@ if not GROQ_API_KEY:
 # -------------------------------
 llm = ChatGroq(
     api_key=GROQ_API_KEY,
-    model="llama3-8b-8192",
-    max_tokens=1024
+    model="meta-llama/llama-prompt-guard-2-22m",
+    max_tokens=10000
 )
 
 # -------------------------------
