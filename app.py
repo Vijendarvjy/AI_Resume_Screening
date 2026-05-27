@@ -198,20 +198,44 @@ graph = workflow.compile()
 st.set_page_config(page_title="AI Resume Screener", layout="wide")
 st.title("🤖 AI Resume Screening System")
 
-uploaded_file = st.file_uploader("Upload Resume (PDF)", type=["pdf"])
-job_description = st.text_area("Paste Job Description", height=250)
+# --- Resume Input Toggle ---
+st.subheader("📋 Resume Input")
+resume_input_mode = st.radio(
+    "Choose how to provide the resume:",
+    options=["📄 Upload PDF", "✏️ Paste Text"],
+    horizontal=True
+)
 
-if st.button("Analyze Resume"):
-    if uploaded_file and job_description:
+resume_text = ""
 
+if resume_input_mode == "📄 Upload PDF":
+    uploaded_file = st.file_uploader("Upload Resume (PDF)", type=["pdf"])
+    if uploaded_file:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(uploaded_file.read())
             temp_path = tmp.name
-
         loader = PyPDFLoader(temp_path)
         pages = loader.load()
         resume_text = "\n".join([p.page_content for p in pages])
+        st.success(f"✅ PDF loaded — {len(pages)} page(s) extracted.")
 
+else:  # Paste Text
+    pasted_text = st.text_area(
+        "Paste resume text here",
+        height=300,
+        placeholder="Paste the full resume content here — name, skills, experience, education, etc."
+    )
+    if pasted_text.strip():
+        resume_text = pasted_text.strip()
+        st.success(f"✅ Text received — {len(resume_text)} characters.")
+
+# --- Job Description ---
+st.subheader("💼 Job Description")
+job_description = st.text_area("Paste Job Description", height=250)
+
+# --- Analyze Button ---
+if st.button("Analyze Resume"):
+    if resume_text and job_description:
         with st.spinner("Analyzing resume..."):
             result = graph.invoke({
                 "resume_text": resume_text,
@@ -232,5 +256,8 @@ if st.button("Analyze Resume"):
 
         st.subheader("🎤 Interview Questions")
         st.write(result["interview_questions"])
-    else:
-        st.warning("⚠️ Please upload a resume and enter a job description.")
+
+    elif not resume_text:
+        st.warning("⚠️ Please upload a PDF or paste resume text.")
+    elif not job_description:
+        st.warning("⚠️ Please enter a job description.")
