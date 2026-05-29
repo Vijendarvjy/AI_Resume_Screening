@@ -28,7 +28,7 @@ if not GROQ_API_KEY:
 # -------------------------------
 llm = ChatGroq(
     api_key=GROQ_API_KEY,
-    model="openai/gpt-oss-120b",
+    model="meta-llama/llama-4-scout-17b-16e-instruct",
     max_tokens=1024
 )
 
