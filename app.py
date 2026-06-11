@@ -249,7 +249,6 @@ st.markdown("""
 
 # ── Header ──────────────────────────────
 st.title("🤖 AI Resume Screening System")
-st.caption(f"Powered by `{CONFIG['model']}` via Groq")
 
 if not GROQ_API_KEY:
     st.error("❌ `GROQ_API_KEY` not found. Add it to `.env` or Streamlit secrets.")
