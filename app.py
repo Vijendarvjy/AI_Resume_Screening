@@ -14,10 +14,10 @@ from typing import TypedDict
 # CONFIG  (edit here, not buried in code)
 # ─────────────────────────────────────────
 CONFIG = {
-    "model":            "meta-llama/llama-4-scout-17b-16e-instruct",
+    "model":            "meta-llama/llama-prompt-guard-2-86m",
     "max_tokens":       1024,
-    "resume_char_limit": 6000,
-    "jd_char_limit":    2000,
+    "resume_char_limit": 8000,
+    "jd_char_limit":    6000,
 }
 
 # ─────────────────────────────────────────
