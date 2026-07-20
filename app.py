@@ -1,8 +1,13 @@
 import os
 import re
 import json
+import time
 import tempfile
+import hashlib
+from datetime import datetime
+
 import streamlit as st
+import plotly.graph_objects as go
 from dotenv import load_dotenv
 
 from langchain_groq import ChatGroq
@@ -11,13 +16,16 @@ from langgraph.graph import StateGraph, END
 from typing import TypedDict
 
 # ─────────────────────────────────────────
-# CONFIG  (edit here, not buried in code)
+# CONFIG
 # ─────────────────────────────────────────
 CONFIG = {
-    "model":            "llama-3.1-8b-instant",
-    "max_tokens":       1024,
+    # Tried in order; on rate-limit/errors we fall through to the next one.
+    "fallback_models": ["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "gemma2-9b-it"],
+    "max_tokens": 1024,
     "resume_char_limit": 8000,
-    "jd_char_limit":    6000,
+    "jd_char_limit": 6000,
+    "max_retries_per_model": 2,
+    "retry_base_delay": 2,  # seconds, doubles each retry
 }
 
 # ─────────────────────────────────────────
@@ -32,15 +40,16 @@ except Exception:
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ─────────────────────────────────────────
-# LLM  (cached so it isn't rebuilt on every rerun)
+# LLM CLIENTS (cached per model name, so switching models doesn't
+# require an app restart)
 # ─────────────────────────────────────────
-@st.cache_resource
-def get_llm():
+@st.cache_resource(show_spinner=False)
+def get_llm(model_name: str):
     if not GROQ_API_KEY:
         return None
     return ChatGroq(
         api_key=GROQ_API_KEY,
-        model=CONFIG["model"],
+        model=model_name,
         max_tokens=CONFIG["max_tokens"],
     )
 
@@ -48,40 +57,68 @@ def get_llm():
 # STATE
 # ─────────────────────────────────────────
 class ResumeState(TypedDict):
-    resume_text:        str
-    job_description:    str
-    parsed_resume:      dict
-    jd_analysis:        str
-    match_score:        str
-    recommendation:     str
+    candidate_name:      str
+    resume_text:         str
+    job_description:     str
+    parsed_resume:        dict
+    jd_analysis:         str
+    match_score:         str
+    recommendation:      str
     interview_questions: str
+    model_used:          str
 
 # ─────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────
 def trim(text: str, limit: int) -> str:
-    """Trim to character limit; warns if truncation occurs."""
+    """Trim to a character limit, preferring to cut on a sentence boundary
+    so we don't waste tokens on a half-sentence and don't cut mid-thought."""
     s = str(text)
-    if len(s) > limit:
-        st.toast(f"⚠️ Input trimmed to {limit} chars for LLM context.", icon="✂️")
-    return s[:limit]
+    if len(s) <= limit:
+        return s
+    truncated = s[:limit]
+    last_period = truncated.rfind(". ")
+    if last_period > limit * 0.8:
+        truncated = truncated[: last_period + 1]
+    st.toast(f"✂️ Trimmed input to ~{len(truncated):,} chars for LLM context.", icon="✂️")
+    return truncated
 
-def safe_invoke(llm, prompt: str, fallback: str = "Unavailable") -> str:
-    try:
-        return llm.invoke(prompt).content
-    except Exception as e:
-        return f"{fallback}: {e}"
+def safe_invoke(prompt: str, fallback: str = "Unavailable") -> tuple[str, str | None]:
+    """Invoke the LLM with retry + exponential backoff on rate limits,
+    and fall through to the next configured model if one is exhausted."""
+    last_err = None
+    for model_name in CONFIG["fallback_models"]:
+        llm = get_llm(model_name)
+        if llm is None:
+            continue
+        for attempt in range(CONFIG["max_retries_per_model"]):
+            try:
+                result = llm.invoke(prompt).content
+                return result, model_name
+            except Exception as e:
+                last_err = e
+                msg = str(e).lower()
+                is_rate_limit = "429" in msg or "rate_limit" in msg or "rate limit" in msg
+                if is_rate_limit:
+                    if attempt < CONFIG["max_retries_per_model"] - 1:
+                        wait = CONFIG["retry_base_delay"] * (2 ** attempt)
+                        time.sleep(wait)
+                        continue
+                    else:
+                        # exhausted retries on this model — try the next one
+                        break
+                else:
+                    # non-rate-limit error — no point retrying same model
+                    break
+    return f"{fallback}: {last_err}", None
 
 def extract_json(raw: str) -> dict:
     """Robustly extract JSON even when the model wraps it in markdown fences."""
-    # strip ```json ... ``` or ``` ... ```
     cleaned = re.sub(r"```(?:json)?", "", raw).replace("```", "").strip()
-    # try direct parse
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
         pass
-    # find first {...} block
     m = re.search(r"\{.*\}", cleaned, re.DOTALL)
     if m:
         try:
@@ -96,10 +133,34 @@ EMPTY_RESUME = {
     "education": "", "certifications": [], "projects": [],
 }
 
+def content_hash(resume_text: str, job_description: str) -> str:
+    return hashlib.sha256((resume_text + "||" + job_description).encode("utf-8")).hexdigest()[:16]
+
+def pct_from_text(text: str) -> int | None:
+    m = re.search(r"(\d{1,3})\s*%", text or "")
+    return int(m.group(1)) if m else None
+
+def decision_from_text(text: str) -> str:
+    m = re.search(r"\*\*Decision:\*\*\s*(\w+)", text or "", re.IGNORECASE)
+    return m.group(1).strip().title() if m else "Unknown"
+
+# ─────────────────────────────────────────
+# CACHED PIPELINE RUN (keyed on resume+JD content, so re-running the
+# exact same pair doesn't burn tokens twice)
+# ─────────────────────────────────────────
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
+def run_pipeline_cached(_graph_placeholder: str, candidate_name: str, resume_text: str, job_description: str) -> dict:
+    graph = make_graph()
+    return graph.invoke({
+        "candidate_name": candidate_name,
+        "resume_text": resume_text,
+        "job_description": job_description,
+    })
+
 # ─────────────────────────────────────────
 # LANGGRAPH NODES
 # ─────────────────────────────────────────
-def make_graph(llm):
+def make_graph():
 
     def parse_resume(state):
         prompt = f"""Extract structured information from this resume.
@@ -119,12 +180,13 @@ Return ONLY a valid JSON object with these exact fields — no explanation, no m
 Resume:
 {trim(state["resume_text"], CONFIG["resume_char_limit"])}"""
 
-        raw = safe_invoke(llm, prompt, "Parse failed")
+        raw, model_used = safe_invoke(prompt, "Parse failed")
         parsed = extract_json(raw)
         if not parsed:
-            st.warning("⚠️ Could not parse resume JSON — using defaults.")
             parsed = EMPTY_RESUME.copy()
-        return {"parsed_resume": parsed}
+            if state.get("candidate_name"):
+                parsed["name"] = state["candidate_name"]
+        return {"parsed_resume": parsed, "model_used": model_used or state.get("model_used", "")}
 
     def analyze_jd(state):
         prompt = f"""Compare the resume and job description below. Be concise and structured.
@@ -140,7 +202,8 @@ Respond with exactly three sections:
 **Missing Skills:** (bullet list)
 **Fit Score:** X/100 — one sentence reason"""
 
-        return {"jd_analysis": safe_invoke(llm, prompt, "JD analysis failed")}
+        raw, model_used = safe_invoke(prompt, "JD analysis failed")
+        return {"jd_analysis": raw, "model_used": model_used or state.get("model_used", "")}
 
     def calculate_match(state):
         prompt = f"""Based on the resume analysis below, produce a concise match report.
@@ -162,7 +225,8 @@ Respond with exactly:
 2. ...
 3. ..."""
 
-        return {"match_score": safe_invoke(llm, prompt, "Match scoring failed")}
+        raw, model_used = safe_invoke(prompt, "Match scoring failed")
+        return {"match_score": raw, "model_used": model_used or state.get("model_used", "")}
 
     def generate_recommendation(state):
         prompt = f"""Based on this match report, give a clear hiring recommendation.
@@ -175,7 +239,8 @@ Respond with exactly:
 **Reasoning:** (one paragraph)
 **Suggested Next Step:** (one sentence)"""
 
-        return {"recommendation": safe_invoke(llm, prompt, "Recommendation failed")}
+        raw, model_used = safe_invoke(prompt, "Recommendation failed")
+        return {"recommendation": raw, "model_used": model_used or state.get("model_used", "")}
 
     def generate_questions(state):
         skills = state["parsed_resume"].get("skills", [])
@@ -188,27 +253,62 @@ Respond with exactly:
 
 Number each question (1–10). Mix difficulty levels. Be specific and practical. No preamble."""
 
-        return {"interview_questions": safe_invoke(llm, prompt, "Question generation failed")}
+        raw, model_used = safe_invoke(prompt, "Question generation failed")
+        return {"interview_questions": raw, "model_used": model_used or state.get("model_used", "")}
 
-    # Build graph
     wf = StateGraph(ResumeState)
     for name, fn in [
-        ("parse_resume",          parse_resume),
-        ("analyze_jd",            analyze_jd),
-        ("calculate_match",       calculate_match),
+        ("parse_resume", parse_resume),
+        ("analyze_jd", analyze_jd),
+        ("calculate_match", calculate_match),
         ("generate_recommendation", generate_recommendation),
-        ("generate_questions",    generate_questions),
+        ("generate_questions", generate_questions),
     ]:
         wf.add_node(name, fn)
 
     wf.set_entry_point("parse_resume")
-    wf.add_edge("parse_resume",           "analyze_jd")
-    wf.add_edge("analyze_jd",             "calculate_match")
-    wf.add_edge("calculate_match",        "generate_recommendation")
-    wf.add_edge("generate_recommendation","generate_questions")
-    wf.add_edge("generate_questions",     END)
+    wf.add_edge("parse_resume", "analyze_jd")
+    wf.add_edge("analyze_jd", "calculate_match")
+    wf.add_edge("calculate_match", "generate_recommendation")
+    wf.add_edge("generate_recommendation", "generate_questions")
+    wf.add_edge("generate_questions", END)
 
     return wf.compile()
+
+# ─────────────────────────────────────────
+# CHARTS
+# ─────────────────────────────────────────
+def match_gauge(pct: int, key: str):
+    color = "#22c55e" if pct >= 70 else ("#f59e0b" if pct >= 45 else "#ef4444")
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=pct,
+        number={"suffix": "%"},
+        gauge={
+            "axis": {"range": [0, 100]},
+            "bar": {"color": color},
+            "steps": [
+                {"range": [0, 45], "color": "#fee2e2"},
+                {"range": [45, 70], "color": "#fef9c3"},
+                {"range": [70, 100], "color": "#dcfce7"},
+            ],
+        },
+        domain={"x": [0, 1], "y": [0, 1]},
+    ))
+    fig.update_layout(height=220, margin=dict(l=20, r=20, t=20, b=10))
+    st.plotly_chart(fig, use_container_width=True, key=key)
+
+def comparison_bar_chart(history: list):
+    names = [h["candidate_name"] for h in history]
+    pcts = [h["match_pct"] if h["match_pct"] is not None else 0 for h in history]
+    colors = ["#22c55e" if p >= 70 else ("#f59e0b" if p >= 45 else "#ef4444") for p in pcts]
+    fig = go.Figure(go.Bar(x=names, y=pcts, marker_color=colors, text=[f"{p}%" for p in pcts], textposition="auto"))
+    fig.update_layout(
+        height=340, margin=dict(l=20, r=20, t=30, b=20),
+        yaxis=dict(title="Match %", range=[0, 100]),
+        title="Candidate comparison",
+    )
+    st.plotly_chart(fig, use_container_width=True, key="comparison_chart")
 
 # ─────────────────────────────────────────
 # STREAMLIT UI
@@ -220,7 +320,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ── Custom CSS ──────────────────────────
 st.markdown("""
 <style>
     .block-container { padding-top: 2rem; }
@@ -237,156 +336,168 @@ st.markdown("""
         border-left: 4px solid #6366f1;
         margin-bottom: 12px;
     }
-    .section-header {
-        font-size: 1.1rem; font-weight: 700;
-        color: #374151; margin-bottom: 4px;
-    }
     .badge-hire    { background:#dcfce7; color:#166534; padding:4px 12px; border-radius:20px; font-weight:700; }
     .badge-reject  { background:#fee2e2; color:#991b1b; padding:4px 12px; border-radius:20px; font-weight:700; }
     .badge-consider{ background:#fef9c3; color:#854d0e; padding:4px 12px; border-radius:20px; font-weight:700; }
+    .model-tag { font-size: 0.75rem; color: #6b7280; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Header ──────────────────────────────
 st.title("🤖 AI Resume Screening System")
 
 if not GROQ_API_KEY:
     st.error("❌ `GROQ_API_KEY` not found. Add it to `.env` or Streamlit secrets.")
     st.stop()
 
-llm = get_llm()
+# ── Session state ────────────────────────
+if "history" not in st.session_state:
+    st.session_state["history"] = []  # list of {candidate_name, timestamp, match_pct, decision, result, model_used}
+if "active_result_idx" not in st.session_state:
+    st.session_state["active_result_idx"] = None
 
-# ── Initialize session state ─────────────
-for key in ["result", "resume_text", "analysis_done"]:
-    if key not in st.session_state:
-        st.session_state[key] = None if key != "analysis_done" else False
-
-# ── Input columns ────────────────────────
+# ── Input ─────────────────────────────────
 col_left, col_right = st.columns(2, gap="large")
 
-with col_left:
-    st.subheader("📋 Resume")
-    mode = st.radio("Input method", ["📄 Upload PDF", "✏️ Paste Text"], horizontal=True)
+candidates = []  # list of (name, resume_text)
 
-    resume_text = ""
-    if mode == "📄 Upload PDF":
-        uploaded = st.file_uploader("Upload PDF", type=["pdf"], label_visibility="collapsed")
-        if uploaded:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(uploaded.read())
-                tmp_path = tmp.name
-            pages = PyPDFLoader(tmp_path).load()
-            resume_text = "\n".join(p.page_content for p in pages)
-            st.success(f"✅ {len(pages)} page(s) extracted — {len(resume_text):,} chars")
-            with st.expander("Preview extracted text"):
-                st.text(resume_text[:2000] + ("…" if len(resume_text) > 2000 else ""))
+with col_left:
+    st.subheader("📋 Resume(s)")
+    mode = st.radio("Input method", ["📄 Upload PDF(s)", "✏️ Paste Text"], horizontal=True)
+
+    if mode == "📄 Upload PDF(s)":
+        uploaded_files = st.file_uploader(
+            "Upload one or more PDFs", type=["pdf"], accept_multiple_files=True,
+            label_visibility="collapsed",
+        )
+        if uploaded_files:
+            for uf in uploaded_files:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    tmp.write(uf.read())
+                    tmp_path = tmp.name
+                pages = PyPDFLoader(tmp_path).load()
+                text = "\n".join(p.page_content for p in pages)
+                candidates.append((uf.name.rsplit(".", 1)[0], text))
+            st.success(f"✅ {len(candidates)} resume(s) loaded — {sum(len(t) for _, t in candidates):,} total chars")
+            with st.expander(f"Preview ({len(candidates)} file(s))"):
+                for name, text in candidates:
+                    st.caption(f"**{name}** — {len(text):,} chars")
     else:
-        resume_text = st.text_area(
-            "Resume text",
-            height=300,
+        pasted = st.text_area(
+            "Resume text", height=300,
             placeholder="Paste the full resume here…",
             label_visibility="collapsed",
         ).strip()
-        if resume_text:
-            st.caption(f"{len(resume_text):,} characters")
+        candidate_name = st.text_input("Candidate name (optional)", placeholder="e.g. Jordan Lee")
+        if pasted:
+            candidates.append((candidate_name or "Candidate", pasted))
+            st.caption(f"{len(pasted):,} characters")
 
 with col_right:
     st.subheader("💼 Job Description")
     job_description = st.text_area(
-        "Job description",
-        height=350,
+        "Job description", height=350,
         placeholder="Paste the job description here…",
         label_visibility="collapsed",
     ).strip()
     if job_description:
         st.caption(f"{len(job_description):,} characters")
 
-# ── Analyze button ───────────────────────
 st.divider()
-run_col, _ = st.columns([1, 4])
+run_col, clear_col = st.columns([1, 1])
 with run_col:
-    analyze_clicked = st.button("🔍 Analyze Resume", type="primary", use_container_width=True)
+    analyze_clicked = st.button(
+        f"🔍 Analyze {len(candidates)} Resume(s)" if len(candidates) > 1 else "🔍 Analyze Resume",
+        type="primary", use_container_width=True,
+    )
+with clear_col:
+    if st.button("🗑️ Clear history", use_container_width=True):
+        st.session_state["history"] = []
+        st.session_state["active_result_idx"] = None
+        st.rerun()
 
 if analyze_clicked:
-    if not resume_text:
-        st.warning("⚠️ Please provide a resume (PDF or text).")
+    if not candidates:
+        st.warning("⚠️ Please provide at least one resume (PDF or text).")
     elif not job_description:
         st.warning("⚠️ Please paste a job description.")
     else:
-        graph = make_graph(llm)
-        steps = [
-            ("🔎 Parsing resume…",           None),
-            ("📊 Analyzing job description…", None),
-            ("🎯 Calculating match score…",   None),
-            ("✅ Generating recommendation…", None),
-            ("🎤 Generating interview questions…", None),
-        ]
-        progress_bar  = st.progress(0, text="Starting analysis…")
-        status_text   = st.empty()
+        progress_bar = st.progress(0, text="Starting analysis…")
+        for i, (name, resume_text) in enumerate(candidates):
+            progress_bar.progress(
+                i / len(candidates),
+                text=f"Analyzing {name} ({i + 1}/{len(candidates)})…",
+            )
+            try:
+                result = run_pipeline_cached("v1", name, resume_text, job_description)
+            except Exception as e:
+                st.error(f"❌ Failed to analyze {name}: {e}")
+                continue
 
-        # Stream node completions via a simple callback approach
-        completed = [0]
-        total = len(steps)
+            entry = {
+                "candidate_name": name,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "match_pct": pct_from_text(result.get("match_score", "")),
+                "decision": decision_from_text(result.get("recommendation", "")),
+                "model_used": result.get("model_used", "unknown"),
+                "result": result,
+                "hash": content_hash(resume_text, job_description),
+            }
+            # avoid duplicate entries for the same resume+JD pair
+            st.session_state["history"] = [
+                h for h in st.session_state["history"] if h["hash"] != entry["hash"]
+            ] + [entry]
 
-        def on_step(step_name):
-            completed[0] += 1
-            label = {
-                "parse_resume":           "✅ Resume parsed",
-                "analyze_jd":             "✅ JD analyzed",
-                "calculate_match":        "✅ Match scored",
-                "generate_recommendation":"✅ Recommendation ready",
-                "generate_questions":     "✅ Questions generated",
-            }.get(step_name, step_name)
-            progress_bar.progress(completed[0] / total, text=label)
-
-        # Run graph — LangGraph doesn't expose per-node hooks in invoke(),
-        # so we update progress after completion using stream()
-        result_state = None
-        for chunk in graph.stream({
-            "resume_text":     resume_text,
-            "job_description": job_description,
-        }):
-            for node_name in chunk:
-                on_step(node_name)
-            result_state = chunk
-
-        # Merge full state
-        full_result = graph.invoke({
-            "resume_text":     resume_text,
-            "job_description": job_description,
-        })
-
+        progress_bar.progress(1.0, text="Done")
+        time.sleep(0.3)
         progress_bar.empty()
-        status_text.empty()
-
-        st.session_state["result"]        = full_result
-        st.session_state["resume_text"]   = resume_text
-        st.session_state["analysis_done"] = True
+        st.session_state["active_result_idx"] = len(st.session_state["history"]) - 1
         st.rerun()
 
 # ── Results ──────────────────────────────
-if st.session_state["analysis_done"] and st.session_state["result"]:
-    result = st.session_state["result"]
-    st.success("✅ Analysis complete!", icon="🎉")
+history = st.session_state["history"]
+
+if history:
+    st.success(f"✅ {len(history)} analysis result(s) available", icon="🎉")
+
+    if len(history) > 1:
+        with st.expander("📊 Candidate comparison", expanded=True):
+            comparison_bar_chart(history)
+            st.dataframe(
+                [
+                    {
+                        "Candidate": h["candidate_name"],
+                        "Match %": h["match_pct"],
+                        "Decision": h["decision"],
+                        "Analyzed": h["timestamp"],
+                        "Model": h["model_used"],
+                    }
+                    for h in history
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    names = [h["candidate_name"] for h in history]
+    default_idx = st.session_state["active_result_idx"] if st.session_state["active_result_idx"] is not None else len(history) - 1
+    selected_name = st.selectbox("View candidate", names, index=default_idx)
+    entry = next(h for h in history if h["candidate_name"] == selected_name)
+    result = entry["result"]
+
+    st.caption(f"Model used: `{entry['model_used']}` · Analyzed {entry['timestamp']}")
 
     tabs = st.tabs([
-        "👤 Parsed Resume",
-        "📊 JD Analysis",
-        "🎯 Match Score",
-        "✅ Recommendation",
-        "🎤 Interview Questions",
-        "⬇️ Export",
+        "👤 Parsed Resume", "📊 JD Analysis", "🎯 Match Score",
+        "✅ Recommendation", "🎤 Interview Questions", "⬇️ Export",
     ])
 
-    # ── Tab 1: Parsed Resume ─────────────
     with tabs[0]:
         p = result["parsed_resume"]
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown(f"**👤 Name:** {p.get('name','—')}")
-            st.markdown(f"**📧 Email:** {p.get('email','—')}")
-            st.markdown(f"**📞 Phone:** {p.get('phone','—')}")
-            st.markdown(f"**🎓 Education:** {p.get('education','—')}")
+            st.markdown(f"**👤 Name:** {p.get('name', '—')}")
+            st.markdown(f"**📧 Email:** {p.get('email', '—')}")
+            st.markdown(f"**📞 Phone:** {p.get('phone', '—')}")
+            st.markdown(f"**🎓 Education:** {p.get('education', '—')}")
             st.markdown(f"**📅 Experience:** {p.get('experience_years', '—')} year(s)")
         with c2:
             skills = p.get("skills", [])
@@ -406,84 +517,77 @@ if st.session_state["analysis_done"] and st.session_state["result"]:
         with st.expander("Raw JSON"):
             st.json(p)
 
-    # ── Tab 2: JD Analysis ───────────────
     with tabs[1]:
         st.markdown(result["jd_analysis"])
 
-    # ── Tab 3: Match Score ───────────────
     with tabs[2]:
-        raw_match = result["match_score"]
-        # Try to pull percentage for a big metric
-        pct_match = re.search(r"(\d{1,3})\s*%", raw_match)
-        if pct_match:
-            pct = int(pct_match.group(1))
-            color = "#22c55e" if pct >= 70 else ("#f59e0b" if pct >= 45 else "#ef4444")
-            st.markdown(
-                f"<div style='font-size:3rem;font-weight:800;color:{color};'>{pct}%</div>"
-                f"<div style='color:#6b7280;margin-bottom:1rem;'>Match score</div>",
-                unsafe_allow_html=True,
-            )
-        st.markdown(raw_match)
+        pct = entry["match_pct"]
+        if pct is not None:
+            match_gauge(pct, key=f"gauge_{entry['hash']}")
+        st.markdown(result["match_score"])
 
-    # ── Tab 4: Recommendation ────────────
     with tabs[3]:
-        rec = result["recommendation"]
-        decision_match = re.search(r"\*\*Decision:\*\*\s*(\w+)", rec, re.IGNORECASE)
-        if decision_match:
-            d = decision_match.group(1).strip().lower()
-            badge_class = {"hire": "badge-hire", "reject": "badge-reject"}.get(d, "badge-consider")
-            st.markdown(
-                f"<span class='{badge_class}'>{d.upper()}</span>",
-                unsafe_allow_html=True,
-            )
-            st.markdown("")
-        st.markdown(rec)
+        d = entry["decision"].lower()
+        badge_class = {"hire": "badge-hire", "reject": "badge-reject"}.get(d, "badge-consider")
+        st.markdown(f"<span class='{badge_class}'>{entry['decision'].upper()}</span>", unsafe_allow_html=True)
+        st.markdown("")
+        st.markdown(result["recommendation"])
 
-    # ── Tab 5: Interview Questions ────────
     with tabs[4]:
-        qs = result["interview_questions"]
-        st.markdown(qs)
+        st.markdown(result["interview_questions"])
 
-    # ── Tab 6: Export ─────────────────────
     with tabs[5]:
         export = {
-            "parsed_resume":     result["parsed_resume"],
-            "jd_analysis":       result["jd_analysis"],
-            "match_score":       result["match_score"],
-            "recommendation":    result["recommendation"],
+            "candidate_name": entry["candidate_name"],
+            "parsed_resume": result["parsed_resume"],
+            "jd_analysis": result["jd_analysis"],
+            "match_score": result["match_score"],
+            "recommendation": result["recommendation"],
             "interview_questions": result["interview_questions"],
+            "model_used": entry["model_used"],
         }
         st.download_button(
-            label="⬇️ Download full report (JSON)",
+            "⬇️ Download this candidate's report (JSON)",
             data=json.dumps(export, indent=2),
-            file_name="resume_screening_report.json",
-            mime="application/json",
-            use_container_width=True,
+            file_name=f"{entry['candidate_name']}_report.json",
+            mime="application/json", use_container_width=True,
         )
 
-        # Markdown report
         md_lines = [
-            "# AI Resume Screening Report\n",
+            f"# AI Resume Screening Report — {entry['candidate_name']}\n",
             "## Parsed Resume\n",
-            f"**Name:** {result['parsed_resume'].get('name','—')}  ",
-            f"**Email:** {result['parsed_resume'].get('email','—')}  ",
-            f"**Skills:** {', '.join(result['parsed_resume'].get('skills',[]))}  \n",
+            f"**Name:** {result['parsed_resume'].get('name', '—')}  ",
+            f"**Email:** {result['parsed_resume'].get('email', '—')}  ",
+            f"**Skills:** {', '.join(result['parsed_resume'].get('skills', []))}  \n",
             "## JD Analysis\n", result["jd_analysis"], "\n",
-            "## Match Score\n",  result["match_score"],  "\n",
+            "## Match Score\n", result["match_score"], "\n",
             "## Recommendation\n", result["recommendation"], "\n",
             "## Interview Questions\n", result["interview_questions"],
         ]
         st.download_button(
-            label="⬇️ Download full report (Markdown)",
+            "⬇️ Download this candidate's report (Markdown)",
             data="\n".join(md_lines),
-            file_name="resume_screening_report.md",
-            mime="text/markdown",
-            use_container_width=True,
+            file_name=f"{entry['candidate_name']}_report.md",
+            mime="text/markdown", use_container_width=True,
         )
 
-    # ── Clear results ────────────────────
-    st.divider()
-    if st.button("🔄 Clear & start over"):
-        for key in ["result", "resume_text", "analysis_done"]:
-            st.session_state[key] = None if key != "analysis_done" else False
-        st.rerun()
+        if len(history) > 1:
+            st.divider()
+            all_export = [
+                {
+                    "candidate_name": h["candidate_name"],
+                    "match_pct": h["match_pct"],
+                    "decision": h["decision"],
+                    "timestamp": h["timestamp"],
+                    "result": h["result"],
+                }
+                for h in history
+            ]
+            st.download_button(
+                "⬇️ Download all candidates (JSON)",
+                data=json.dumps(all_export, indent=2),
+                file_name="all_candidates_report.json",
+                mime="application/json", use_container_width=True,
+            )
+else:
+    st.info("Upload or paste resume(s) and a job description, then click Analyze.")
