@@ -1,5 +1,5 @@
 streamlit==1.44.1
-
+plotly>=5.18
 langchain==0.3.25
 langchain-core==0.3.59
 langchain-community==0.3.24
