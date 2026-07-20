@@ -14,7 +14,7 @@ from typing import TypedDict
 # CONFIG  (edit here, not buried in code)
 # ─────────────────────────────────────────
 CONFIG = {
-    "model":            "llama-3.3-70b-versatile",
+    "model":            "meta-llama/llama-prompt-guard-2-86m",
     "max_tokens":       1024,
     "resume_char_limit": 8000,
     "jd_char_limit":    6000,
