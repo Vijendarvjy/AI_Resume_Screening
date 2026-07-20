@@ -339,7 +339,11 @@ st.markdown("""
     .badge-hire    { background:#dcfce7; color:#166534; padding:4px 12px; border-radius:20px; font-weight:700; }
     .badge-reject  { background:#fee2e2; color:#991b1b; padding:4px 12px; border-radius:20px; font-weight:700; }
     .badge-consider{ background:#fef9c3; color:#854d0e; padding:4px 12px; border-radius:20px; font-weight:700; }
-    .model-tag { font-size: 0.75rem; color: #6b7280; }
+    .model-tag {
+        display: inline-block; font-size: 0.8rem; font-weight: 600;
+        color: #374151; background: #e5e7eb;
+        padding: 4px 12px; border-radius: 20px; margin-bottom: 10px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -483,7 +487,10 @@ if history:
     entry = next(h for h in history if h["candidate_name"] == selected_name)
     result = entry["result"]
 
-    st.caption(f"Model used: `{entry['model_used']}` · Analyzed {entry['timestamp']}")
+    st.markdown(
+        f"<span class='model-tag'>🧠 {entry['model_used']} · analyzed {entry['timestamp']}</span>",
+        unsafe_allow_html=True,
+    )
 
     tabs = st.tabs([
         "👤 Parsed Resume", "📊 JD Analysis", "🎯 Match Score",
