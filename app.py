@@ -315,34 +315,42 @@ Number each question (1–10). Mix difficulty levels. Be specific and practical.
 # CHARTS
 # ─────────────────────────────────────────
 def match_gauge(pct: int, key: str):
-    color = "#22c55e" if pct >= 70 else ("#f59e0b" if pct >= 45 else "#ef4444")
+    color = "#15803D" if pct >= 70 else ("#B45309" if pct >= 45 else "#B91C1C")
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=pct,
-        number={"suffix": "%"},
+        number={"suffix": "%", "font": {"family": "IBM Plex Mono, monospace", "color": "#0B1220"}},
         gauge={
-            "axis": {"range": [0, 100]},
+            "axis": {"range": [0, 100], "tickcolor": "#E4E7EC"},
             "bar": {"color": color},
+            "bgcolor": "#FFFFFF",
+            "bordercolor": "#E4E7EC",
             "steps": [
-                {"range": [0, 45], "color": "#fee2e2"},
-                {"range": [45, 70], "color": "#fef9c3"},
-                {"range": [70, 100], "color": "#dcfce7"},
+                {"range": [0, 45], "color": "#FEE2E2"},
+                {"range": [45, 70], "color": "#FEF3C7"},
+                {"range": [70, 100], "color": "#DCFCE7"},
             ],
         },
         domain={"x": [0, 1], "y": [0, 1]},
     ))
-    fig.update_layout(height=220, margin=dict(l=20, r=20, t=20, b=10))
+    fig.update_layout(
+        height=220, margin=dict(l=20, r=20, t=20, b=10),
+        paper_bgcolor="#FFFFFF", font={"family": "Inter, sans-serif", "color": "#0B1220"},
+    )
     st.plotly_chart(fig, use_container_width=True, key=key)
 
 def comparison_bar_chart(history: list):
     names = [h["candidate_name"] for h in history]
     pcts = [h["match_pct"] if h["match_pct"] is not None else 0 for h in history]
-    colors = ["#22c55e" if p >= 70 else ("#f59e0b" if p >= 45 else "#ef4444") for p in pcts]
+    colors = ["#15803D" if p >= 70 else ("#B45309" if p >= 45 else "#B91C1C") for p in pcts]
     fig = go.Figure(go.Bar(x=names, y=pcts, marker_color=colors, text=[f"{p}%" for p in pcts], textposition="auto"))
     fig.update_layout(
         height=340, margin=dict(l=20, r=20, t=30, b=20),
-        yaxis=dict(title="Match %", range=[0, 100]),
-        title="Candidate comparison",
+        yaxis=dict(title="Match %", range=[0, 100], gridcolor="#E4E7EC"),
+        xaxis=dict(linecolor="#E4E7EC"),
+        title=dict(text="Candidate comparison", font=dict(family="Sora, sans-serif", size=16, color="#0B1220")),
+        plot_bgcolor="#FFFFFF", paper_bgcolor="#FFFFFF",
+        font={"family": "Inter, sans-serif", "color": "#0B1220"},
     )
     st.plotly_chart(fig, use_container_width=True, key="comparison_chart")
 
@@ -358,32 +366,105 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .block-container { padding-top: 2rem; }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] {
-        height: 44px; padding: 0 20px;
-        border-radius: 8px 8px 0 0;
-        font-weight: 600;
-    }
-    .metric-card {
-        background: #f8f9fa;
-        border-radius: 10px;
-        padding: 16px 20px;
-        border-left: 4px solid #6366f1;
-        margin-bottom: 12px;
-    }
-    .badge-hire    { background:#dcfce7; color:#166534; padding:4px 12px; border-radius:20px; font-weight:700; }
-    .badge-reject  { background:#fee2e2; color:#991b1b; padding:4px 12px; border-radius:20px; font-weight:700; }
-    .badge-consider{ background:#fef9c3; color:#854d0e; padding:4px 12px; border-radius:20px; font-weight:700; }
-    .model-tag {
-        display: inline-block; font-size: 0.8rem; font-weight: 600;
-        color: #374151; background: #e5e7eb;
-        padding: 4px 12px; border-radius: 20px; margin-bottom: 10px;
-    }
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap');
+
+:root {
+    --ink:        #0B1220;
+    --ink-soft:   #475467;
+    --bg:         #FFFFFF;
+    --surface:    #F7F8FB;
+    --border:     #E4E7EC;
+    --indigo:     #4F46E5;
+    --indigo-soft:#EEF2FF;
+    --teal:       #0E7490;
+    --teal-soft:  #ECFEFF;
+    --green:      #15803D;
+    --green-soft: #DCFCE7;
+    --red:        #B91C1C;
+    --red-soft:   #FEE2E2;
+    --amber:      #B45309;
+    --amber-soft: #FEF3C7;
+}
+
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; color: var(--ink); }
+.stApp { background: var(--bg); }
+
+h1, h2, h3, .stTitle, [data-testid="stMarkdownContainer"] h1 {
+    font-family: 'Sora', sans-serif; font-weight: 700; color: var(--ink); letter-spacing: -0.01em;
+}
+[data-testid="stMarkdownContainer"] h3 { font-weight: 600; }
+
+.app-subtitle {
+    font-family: 'Inter', sans-serif; color: var(--ink-soft); font-size: 0.95rem;
+    margin-top: -8px; margin-bottom: 1.6rem;
+}
+
+/* Section wayfinding: small colored eyebrow label above each panel heading */
+.eyebrow {
+    display: block; font-family: 'IBM Plex Mono', monospace; font-size: 0.72rem;
+    font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+    margin-bottom: 6px;
+}
+.eyebrow-indigo { color: var(--indigo); }
+.eyebrow-teal   { color: var(--teal); }
+
+/* White panel cards with a colored top rail — the input areas of the workflow */
+.panel {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px 22px 6px 22px; margin-bottom: 18px;
+}
+.panel-indigo { border-top: 3px solid var(--indigo); }
+.panel-teal   { border-top: 3px solid var(--teal); }
+
+.metric-card {
+    background: var(--surface); border-radius: 10px; padding: 16px 20px;
+    border-left: 4px solid var(--indigo); margin-bottom: 12px;
+}
+
+/* Status badges: soft tint background, solid text — consistent across the app */
+.badge-hire, .badge-reject, .badge-consider {
+    display: inline-block; font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.78rem; font-weight: 600; letter-spacing: 0.03em;
+    padding: 5px 14px; border-radius: 20px; text-transform: uppercase;
+}
+.badge-hire     { background: var(--green-soft); color: var(--green); }
+.badge-reject   { background: var(--red-soft);   color: var(--red); }
+.badge-consider { background: var(--amber-soft); color: var(--amber); }
+
+.model-tag {
+    display: inline-block; font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem;
+    font-weight: 500; color: var(--teal); background: var(--teal-soft);
+    padding: 5px 14px; border-radius: 20px; margin-bottom: 12px; border: 1px solid #CFFAFE;
+}
+
+.skill-chip {
+    display: inline-block; font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem;
+    color: var(--indigo); background: var(--indigo-soft); border: 1px solid #E0E7FF;
+    padding: 3px 10px; border-radius: 6px; margin: 0 6px 6px 0;
+}
+
+/* Tabs restyled as a segmented control */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 4px; background: var(--surface); padding: 4px; border-radius: 10px;
+    border: 1px solid var(--border);
+}
+.stTabs [data-baseweb="tab"] {
+    height: 42px; padding: 0 18px; border-radius: 8px; font-weight: 600;
+    color: var(--ink-soft);
+}
+.stTabs [aria-selected="true"] {
+    background: var(--bg) !important; color: var(--indigo) !important;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+}
+
+.block-container { padding-top: 2rem; }
+.stButton > button[kind="primary"] { background: var(--indigo); border-color: var(--indigo); }
+hr { border-color: var(--border); }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🤖 AI Resume Screening System")
+st.markdown('<div class="app-subtitle">Enterprise resume intelligence — structured scoring, fit analysis, and interview prep in one pass.</div>', unsafe_allow_html=True)
 
 if not GROQ_API_KEY:
     st.error("❌ `GROQ_API_KEY` not found. Add it to `.env` or Streamlit secrets.")
@@ -401,6 +482,10 @@ col_left, col_right = st.columns(2, gap="large")
 candidates = []  # list of (name, resume_text)
 
 with col_left:
+    st.markdown(
+        '<div class="panel panel-indigo"><span class="eyebrow eyebrow-indigo">Input · Candidate</span>',
+        unsafe_allow_html=True,
+    )
     st.subheader("📋 Resume(s)")
     mode = st.radio("Input method", ["📄 Upload PDF(s)", "✏️ Paste Text"], horizontal=True)
 
@@ -439,7 +524,13 @@ with col_left:
             candidates.append((candidate_name or "Candidate", pasted))
             st.caption(f"{len(pasted):,} characters")
 
+    st.markdown('</div>', unsafe_allow_html=True)
+
 with col_right:
+    st.markdown(
+        '<div class="panel panel-teal"><span class="eyebrow eyebrow-teal">Input · Role</span>',
+        unsafe_allow_html=True,
+    )
     st.subheader("💼 Job Description")
     job_description = st.text_area(
         "Job description", height=350,
@@ -448,6 +539,7 @@ with col_right:
     ).strip()
     if job_description:
         st.caption(f"{len(job_description):,} characters")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 st.divider()
 run_col, clear_col = st.columns([1, 1])
@@ -554,7 +646,8 @@ if history:
             skills = p.get("skills", [])
             st.markdown(f"**🛠️ Skills ({len(skills)}):**")
             if skills:
-                st.markdown(" ".join(f"`{s}`" for s in skills))
+                chips = "".join(f'<span class="skill-chip">{s}</span>' for s in skills)
+                st.markdown(chips, unsafe_allow_html=True)
             certs = p.get("certifications", [])
             if certs:
                 st.markdown("**🏅 Certifications:**")
