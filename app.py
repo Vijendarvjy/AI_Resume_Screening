@@ -4,6 +4,7 @@ import json
 import time
 import tempfile
 import hashlib
+import copy
 from datetime import datetime
 
 import streamlit as st
@@ -13,7 +14,7 @@ from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_community.document_loaders import PyPDFLoader
 from langgraph.graph import StateGraph, END
-from typing import TypedDict
+from typing import TypedDict, Optional, Tuple
 
 # ─────────────────────────────────────────
 # CONFIG
@@ -83,7 +84,7 @@ def trim(text: str, limit: int) -> str:
     st.toast(f"✂️ Trimmed input to ~{len(truncated):,} chars for LLM context.", icon="✂️")
     return truncated
 
-def safe_invoke(prompt: str, fallback: str = "Unavailable") -> tuple[str, str | None]:
+def safe_invoke(prompt: str, fallback: str = "Unavailable") -> Tuple[str, Optional[str]]:
     """Invoke the LLM with retry + exponential backoff on rate limits,
     and fall through to the next configured model if one is exhausted."""
     last_err = None
@@ -133,11 +134,26 @@ EMPTY_RESUME = {
     "education": "", "certifications": [], "projects": [],
 }
 
-def content_hash(resume_text: str, job_description: str) -> str:
-    return hashlib.sha256((resume_text + "||" + job_description).encode("utf-8")).hexdigest()[:16]
+def empty_resume() -> dict:
+    """Fresh copy of the fallback resume shape. Must be a deep copy — EMPTY_RESUME's
+    list fields (skills/certifications/projects) would otherwise be shared mutable
+    state across every candidate that hits the parse-failure fallback."""
+    return copy.deepcopy(EMPTY_RESUME)
 
-def pct_from_text(text: str) -> int | None:
-    m = re.search(r"(\d{1,3})\s*%", text or "")
+def content_hash(candidate_name: str, resume_text: str, job_description: str) -> str:
+    return hashlib.sha256(
+        (candidate_name + "||" + resume_text + "||" + job_description).encode("utf-8")
+    ).hexdigest()[:16]
+
+def pct_from_text(text: str) -> Optional[int]:
+    """Pull the match percentage. Anchor to the '**Match Percentage:**' label first
+    so an unrelated number/percent mentioned earlier in the text can't be picked up
+    by mistake; fall back to the first bare percentage only if the label is missing."""
+    text = text or ""
+    m = re.search(r"\*\*Match Percentage:\*\*\s*(\d{1,3})\s*%", text, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(\d{1,3})\s*%", text)
     return int(m.group(1)) if m else None
 
 def decision_from_text(text: str) -> str:
@@ -156,6 +172,26 @@ def run_pipeline_cached(_graph_placeholder: str, candidate_name: str, resume_tex
         "resume_text": resume_text,
         "job_description": job_description,
     })
+
+# ─────────────────────────────────────────
+# PDF TEXT EXTRACTION (cached by file bytes so re-runs/reruns don't
+# re-parse the same PDF over and over; also isolates failures per file)
+# ─────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def extract_pdf_text(file_bytes: bytes) -> str:
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+        pages = PyPDFLoader(tmp_path).load()
+        return "\n".join(p.page_content for p in pages)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 # ─────────────────────────────────────────
 # LANGGRAPH NODES
@@ -183,7 +219,7 @@ Resume:
         raw, model_used = safe_invoke(prompt, "Parse failed")
         parsed = extract_json(raw)
         if not parsed:
-            parsed = EMPTY_RESUME.copy()
+            parsed = empty_resume()
             if state.get("candidate_name"):
                 parsed["name"] = state["candidate_name"]
         return {"parsed_resume": parsed, "model_used": model_used or state.get("model_used", "")}
@@ -374,17 +410,24 @@ with col_left:
             label_visibility="collapsed",
         )
         if uploaded_files:
+            load_errors = []
             for uf in uploaded_files:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                    tmp.write(uf.read())
-                    tmp_path = tmp.name
-                pages = PyPDFLoader(tmp_path).load()
-                text = "\n".join(p.page_content for p in pages)
-                candidates.append((uf.name.rsplit(".", 1)[0], text))
-            st.success(f"✅ {len(candidates)} resume(s) loaded — {sum(len(t) for _, t in candidates):,} total chars")
-            with st.expander(f"Preview ({len(candidates)} file(s))"):
-                for name, text in candidates:
-                    st.caption(f"**{name}** — {len(text):,} chars")
+                try:
+                    text = extract_pdf_text(uf.getvalue())
+                    if not text.strip():
+                        load_errors.append(f"{uf.name} — no extractable text (likely a scanned image PDF)")
+                        continue
+                    candidates.append((uf.name.rsplit(".", 1)[0], text))
+                except Exception as e:
+                    load_errors.append(f"{uf.name} — failed to read ({e})")
+
+            if candidates:
+                st.success(f"✅ {len(candidates)} resume(s) loaded — {sum(len(t) for _, t in candidates):,} total chars")
+                with st.expander(f"Preview ({len(candidates)} file(s))"):
+                    for name, text in candidates:
+                        st.caption(f"**{name}** — {len(text):,} chars")
+            for err in load_errors:
+                st.warning(f"⚠️ {err}")
     else:
         pasted = st.text_area(
             "Resume text", height=300,
@@ -444,9 +487,9 @@ if analyze_clicked:
                 "decision": decision_from_text(result.get("recommendation", "")),
                 "model_used": result.get("model_used", "unknown"),
                 "result": result,
-                "hash": content_hash(resume_text, job_description),
+                "hash": content_hash(name, resume_text, job_description),
             }
-            # avoid duplicate entries for the same resume+JD pair
+            # avoid duplicate entries for the same candidate+resume+JD combo
             st.session_state["history"] = [
                 h for h in st.session_state["history"] if h["hash"] != entry["hash"]
             ] + [entry]
@@ -483,6 +526,7 @@ if history:
 
     names = [h["candidate_name"] for h in history]
     default_idx = st.session_state["active_result_idx"] if st.session_state["active_result_idx"] is not None else len(history) - 1
+    default_idx = max(0, min(default_idx, len(names) - 1))
     selected_name = st.selectbox("View candidate", names, index=default_idx)
     entry = next(h for h in history if h["candidate_name"] == selected_name)
     result = entry["result"]
