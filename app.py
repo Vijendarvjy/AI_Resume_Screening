@@ -21,7 +21,10 @@ from typing import TypedDict, Optional, Tuple
 # ─────────────────────────────────────────
 CONFIG = {
     # Tried in order; on rate-limit/errors we fall through to the next one.
-    "fallback_models": ["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "gemma2-9b-it"],
+    # NOTE (Aug 2026): llama-3.1-8b-instant, llama-3.3-70b-versatile, and gemma2-9b-it
+    # are all deprecated/decommissioned on Groq. Using their current recommended
+    # replacements instead — see https://console.groq.com/docs/deprecations
+    "fallback_models": ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.6-27b"],
     "max_tokens": 1024,
     "resume_char_limit": 8000,
     "jd_char_limit": 6000,
